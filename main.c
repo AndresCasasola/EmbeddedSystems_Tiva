@@ -4,7 +4,7 @@
 // Autores: Eva Gonzalez, Ignacio Herrero, Jose Manuel Cano
 //
 //*****************************************************************************
-
+/*hola*/
 #include <serialprotocol.h>
 #include <serialprotocol.h>
 #include<stdbool.h>
