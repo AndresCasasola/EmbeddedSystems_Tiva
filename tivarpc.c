@@ -2,6 +2,7 @@
  * tivarpc.c
  *
  * Implementa la funcionalidad RPC entre la TIVA y el interfaz de usuario
+ *
  */
 
 #include <tivarpc.h>
@@ -29,16 +30,41 @@
 //Defino a un tipo que es un puntero a funcion con el prototipo que tienen que tener las funciones que definamos
 typedef int32_t (*rpc_function_prototype)(uint32_t param_size, void *param);
 
+// Globales
 static uint8_t Rxframe[MAX_FRAME_SIZE];	//Usar una global permite ahorrar pila en la tarea de RX.
 static uint8_t Txframe[MAX_FRAME_SIZE]; //Usar una global permite ahorrar pila en las tareas, pero hay que tener cuidado al transmitir desde varias tareas!!!!
 static uint32_t gRemoteProtocolErrors=0;
-
-//Funciones "internas//
+TaskHandle_t xHandle=NULL;  // Manejador de la tarea para poder eliminarla
 static int32_t TivaRPC_ReceiveFrame(uint8_t *frame, int32_t maxFrameSize);
 
-// *********************************************************************************************
-// ********************* FUNCIONES RPC (se ejecutan en respuesta a comandos RPC recibidos desde el interfaz Qt *********************
-// *********************************************************************************************
+
+    /**************  INICIO: TAREA BOTONES :INICIO  **************/
+
+static portTASK_FUNCTION( TivaRPC_ButtonsTask, pvParameters ){
+
+    UARTprintf("Buttons task working...\n");
+    if ((buttonsQueue = xQueueCreate(MAX_BUTTONS_QUEUE_ELEMENTS, 2*sizeof(bool))) == NULL )
+    {
+        while(1);
+    }
+
+    bool buttons[2];
+
+    while(1){
+        xQueueReceive(buttonsQueue, (void *) buttons, portMAX_DELAY);
+
+        PARAMETERS_SWITCHES_INTERRUPT parametro;
+        parametro.state1=buttons[0];
+        parametro.state2=buttons[1];
+
+        TivaRPC_SendFrame(COMMAND_SWITCHES_INTERRUPT, &parametro, sizeof(parametro));
+    }
+}
+    /**************  FIN: TAREA BOTONES :FIN  **************/
+
+/*  =====================================================================================  */
+/*  ==============  INICIO: Funciones RPC (Remote Procedure Call) :INICIO  ==============  */
+/*  =====================================================================================  */
 
 //Funcion que se ejecuta cuando llega un paquete indicando comando rechazado
 static int32_t RPC_RejectedCommand(uint32_t param_size, void *param)
@@ -59,8 +85,6 @@ static int32_t RPC_Ping(uint32_t param_size, void *param)
     return numdatos;
 }
 
-
-
 //Funcion que se ejecuta cuando llega el comando que configura los LEDS
 static int32_t RPC_LEDGpio(uint32_t param_size, void *param)
 {
@@ -70,6 +94,32 @@ static int32_t RPC_LEDGpio(uint32_t param_size, void *param)
     {
         GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3,parametro.value);
         return 0;	//Devuelve Ok (valor mayor no negativo)
+    }
+    else
+    {
+        return PROT_ERROR_INCORRECT_PARAM_SIZE; //Devuelve un error
+    }
+}
+
+//Funcion que se ejecuta cuando recibimos un comando que no tenemos aun implementado
+static int32_t RPC_GpioPwmMode(uint32_t param_size, void *param)
+{
+    PARAMETERS_GPIO_PWM_MODE parametro;
+    int32_t i32Status=0;
+
+    if (check_and_extract_command_param(param, param_size, sizeof(parametro),&parametro)>0)
+    {
+        if(parametro.mode == 0){
+            RGBDisable();
+            ROM_GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3);
+        }else if(parametro.mode == 1)
+            RGBEnable();
+
+        if(i32Status == -1) // CMDLINE_BAD_CMD = -1
+        {
+            UARTprintf("Error en RPC_GpioPwmMode !\n");   //No pongo acentos adrede
+        }
+        return 0;   //Devuelve Ok (valor mayor no negativo)
     }
     else
     {
@@ -103,18 +153,91 @@ static int32_t RPC_LEDPwmBrightness(uint32_t param_size, void *param)
     }
 }
 
-// *********************************************************************************************
-// ********************* Tabla de  FUnciones RPC
-// *********************************************************************************************
+static int32_t RPC_LEDPwmColor(uint32_t param_size, void *param)
+{
+    PARAMETERS_LED_PWM_COLOR parametro;
+    int i;
+
+    if (check_and_extract_command_param(param, param_size, sizeof(parametro),&parametro)>0)
+    {
+
+        for(i=0; i<3; i++){
+            parametro.rgb[i] *= 255;
+        }
+
+        RGBColorSet(parametro.rgb);
+
+        return 0;   //Devuelve Ok (valor mayor no negativo)
+    }
+    else
+    {
+        return PROT_ERROR_INCORRECT_PARAM_SIZE; //Devuelve un error
+    }
+}
+
+static int32_t RPC_SwitchesSound(uint32_t param_size, void *param)
+{
+    PARAMETERS_SWITCHES_SOUND parametro;
+
+    // Sondeo Switches
+    parametro.state1=( 0 == GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_4) );
+    parametro.state2=( 0 == GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_0) );
+
+    return TivaRPC_SendFrame(COMMAND_SWITCHES_SOUND,&parametro,sizeof(parametro));
+
+}
+
+static int32_t RPC_SwitchesInterruptEnable(uint32_t param_size, void *param)
+{
+    PARAMETERS_SWITCHES_INTERRUPT_ENABLE parametro;
+
+    if (check_and_extract_command_param(param, param_size, sizeof(parametro),&parametro)>0)
+    {
+        if(parametro.check){
+
+            if((xTaskCreate(TivaRPC_ButtonsTask, (portCHAR *)"TivaRPC_ButtonsTask", 512,NULL,tskIDLE_PRIORITY + 1, &xHandle) != pdTRUE))
+            {
+                    while(1);
+            }
+
+            GPIOIntClear(GPIO_PORTF_BASE,GPIO_PIN_4|GPIO_PIN_0);
+            GPIOIntEnable(GPIO_PORTF_BASE,GPIO_PIN_4|GPIO_PIN_0);
+            IntEnable(INT_GPIOF);
+
+        }else{
+
+            vQueueDelete(buttonsQueue);
+            GPIOIntDisable(GPIO_PORTF_BASE,GPIO_PIN_4|GPIO_PIN_0);
+            GPIOIntClear(GPIO_PORTF_BASE,GPIO_PIN_4|GPIO_PIN_0);
+            vTaskDelete(xHandle);
+        }
+
+    }
+    return 0;
+}
+/*  ===============================================================================  */
+/*  ==============  FIN: Funciones RPC (Remote Procedure Call) :FIN  ==============  */
+/*  ===============================================================================  */
+
+
+/*  =================================================================  */
+/*  ===================  TABLA DE FUNCIONES RPC  ====================  */
+/*  =================================================================  */
+
 /* Array que contiene las funciones que se van a ejecutar en respuesta a cada comando */
 static const rpc_function_prototype rpc_function_table[]={
-                                            RPC_RejectedCommand, /* Responde al paquete comando rechazado */
-                                            RPC_Ping, /* Responde al comando ping */
-                                            RPC_LEDGpio, /* Responde al comando LEDS */
-                                            RPC_LEDPwmBrightness, /* Responde al comando Brillo */
-                                            RPC_UnimplementedCommand /* Este comando no esta implementado aun */
+                                            RPC_RejectedCommand,            /* Responde al paquete comando rechazado */
+                                            RPC_Ping,                       /* Responde al comando ping */
+                                            RPC_LEDGpio,                    /* Responde al comando LEDS */
+                                            RPC_LEDPwmBrightness,           /* Responde al comando Brillo */
+                                            RPC_GpioPwmMode,                /* Responde al comando Modo (PWM/GPIO) */
+                                            RPC_LEDPwmColor,                /* Responde al comando Color */
+                                            RPC_SwitchesSound,              /* Responde al comando para sondear los switches */
+                                            RPC_SwitchesInterruptEnable,    /* Responde al comando para (des)habilitar las interrupciones de los botones */
+                                            RPC_UnimplementedCommand        /* Responde a cualquier comando no declarado */
 };
 
+    /**************  INICIO: TAREA SERVER :INICIO  **************/
 
 // Codigo para procesar los comandos recibidos a traves del canal USB del micro ("conector lateral")
 //Esta tarea decodifica los comandos y ejecuta la función que corresponda a cada uno de ellos (por posicion)
@@ -229,6 +352,7 @@ static portTASK_FUNCTION( TivaRPC_ServerTask, pvParameters ){
         }
     }
 }
+    /**************  FIN: TAREA SERVER :FIN  **************/
 
 
 //Inicializa la tarea que recibe comandos (se debe llamar desde main())
@@ -292,18 +416,7 @@ static int32_t TivaRPC_ReceiveFrame(uint8_t *frame, int32_t maxFrameSize)
     }
     else
     {
-
-        if (i<(MINIMUN_FRAME_SIZE-START_SIZE))
-        {
-            return PROT_ERROR_BAD_SIZE; //La trama no tiene el tamanio minimo
-        }
-        else
-        {
-            return (i-END_SIZE); //Tamanio de la trama sin los bytes de inicio y fin
-        }
+        return (i-END_SIZE);    //Devuelve el numero de bytes recibidos (quitando el de BYTE DE STOP)
     }
 }
-
-
-
 

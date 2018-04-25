@@ -3,13 +3,16 @@
 // Codigo de partida Practica 1.
 // Autores: Eva Gonzalez, Ignacio Herrero, Jose Manuel Cano
 //
+// Modificado por: Andres Casasola Dominguez, Guillermo Montoro Montilla
+//
+// Grado Ingeniería de Sistemas Electronicos
+//
 //*****************************************************************************
-/*hola*/
-#include <serialprotocol.h>
-#include <serialprotocol.h>
-#include<stdbool.h>
-#include<stdint.h>
 
+#include <serialprotocol.h>
+#include <serialprotocol.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include "inc/hw_memmap.h"
 #include "inc/hw_types.h"
 #include "inc/hw_ints.h"
@@ -28,16 +31,16 @@
 #include "queue.h"
 #include "semphr.h"
 #include "utils/cpu_usage.h"
-
 #include "drivers/rgb.h"
 #include <tivarpc.h>
 
-//Globales
+// Globales
 uint32_t g_ui32CPUUsage;
 uint32_t g_ulSystemClock;
-
 extern void vUARTTask( void *pvParameters );
 
+// Rutina botones
+void ButtonHandler(void);
 
 //*****************************************************************************
 //
@@ -103,8 +106,6 @@ void vApplicationMallocFailedHook (void)
 	while(1);
 }
 
-
-
 //*****************************************************************************
 //
 // A continuacion van las tareas...
@@ -117,36 +118,6 @@ void vApplicationMallocFailedHook (void)
 extern void vUARTTask( void *pvParameters );
 
 
-
-// Codigo de tarea de ejemplo: Esta tarea no se llega realmente a crear en el ejemplo inicial
-static portTASK_FUNCTION(LEDTask,pvParameters)
-{
-
-	uint8_t estado_led=0;
-
-	//
-	// Bucle infinito, las tareas en FreeRTOS no pueden "acabar", deben "matarse" con la funcion xTaskDelete().
-	//
-	while(1)
-	{
-		estado_led=!estado_led;
-
-		if (estado_led)
-		{
-			GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1 , GPIO_PIN_1);
-			vTaskDelay(0.1*configTICK_RATE_HZ);        //Espera del RTOS (eficiente, no gasta CPU)
-			//Esta espera es de unos 100ms aproximadamente.
-		}
-		else
-		{
-			GPIOPinWrite(GPIO_PORTF_BASE,  GPIO_PIN_1,0);
-			vTaskDelay(2*configTICK_RATE_HZ);        //Espera del RTOS (eficiente, no gasta CPU)
-			//Esta espera es de unos 2s aproximadamente.
-		}
-	}
-}
-
-
 //*****************************************************************************
 //
 // Funcion main(), Inicializa los perifericos, crea las tareas, etc... y arranca el bucle del sistema
@@ -154,17 +125,15 @@ static portTASK_FUNCTION(LEDTask,pvParameters)
 //*****************************************************************************
 int main(void)
 {
+    /*  ========================================================================  */
+    /* =============== INICIO: Configuracion del sistema :INICIO ===============  */
+    /*  ========================================================================  */
 
-	//
 	// Set the clocking to run at 40 MHz from the PLL.
-	//
-	ROM_SysCtlClockSet(SYSCTL_SYSDIV_5 | SYSCTL_USE_PLL | SYSCTL_XTAL_16MHZ |
-			SYSCTL_OSC_MAIN);	//Ponermos el reloj principal a 40 MHz (200 Mhz del Pll dividido por 5)
-
+	ROM_SysCtlClockSet(SYSCTL_SYSDIV_5 | SYSCTL_USE_PLL | SYSCTL_XTAL_16MHZ | SYSCTL_OSC_MAIN);	//Ponermos el reloj principal a 40 MHz (200 Mhz del Pll dividido por 5)
 
 	// Get the system clock speed.
 	g_ulSystemClock = SysCtlClockGet();
-
 
 	//Habilita el clock gating de los perifericos durante el bajo consumo --> perifericos que se desee activos en modo Sleep
 	//                                                                        deben habilitarse con SysCtlPeripheralSleepEnable
@@ -175,11 +144,10 @@ int main(void)
 	// (y por tanto este no se deberia utilizar para otra cosa).
 	CPUUsageInit(g_ulSystemClock, configTICK_RATE_HZ/10, 3);
 
-	//
 	// Inicializa la UARTy la configura a 115.200 bps, 8-N-1 .
 	//se usa para mandar y recibir mensajes y comandos por el puerto serie
 	// Mediante un programa terminal como gtkterm, putty, cutecom, etc...
-	//
+
 	ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
 	ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
 	ROM_GPIOPinConfigure(GPIO_PA0_U0RX);
@@ -190,6 +158,11 @@ int main(void)
 	ROM_SysCtlPeripheralSleepEnable(SYSCTL_PERIPH_UART0);	//La UART tiene que seguir funcionando aunque el micro este dormido
 	ROM_SysCtlPeripheralSleepEnable(SYSCTL_PERIPH_GPIOA);	//La UART tiene que seguir funcionando aunque el micro este dormido
 
+	// Configuracion de botones e interrupciones
+	ButtonsInit();
+	IntRegister(INT_GPIOF, ButtonHandler);
+	GPIOIntTypeSet(GPIO_PORTF_BASE, GPIO_PIN_4|GPIO_PIN_0, GPIO_BOTH_EDGES);
+	IntPrioritySet(INT_GPIOF,configMAX_SYSCALL_INTERRUPT_PRIORITY);
 
 	//Inicializa los LEDs usando libreria RGB --> usa Timers 0 y 1 (eliminar si no se usa finalmente)
 	RGBInit(1);
@@ -200,11 +173,14 @@ int main(void)
 	//Volvemos a configurar los LEDs en modo GPIO POR Defecto
     ROM_GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3);
 
+    /*  ==================================================================  */
+    /*  =============== FIN: Configuracion del sistema :FIN =============== */
+    /*  ==================================================================  */
 
-	/********************************      Creacion de tareas 												**/
+
+	/********** Creacion de tareas **********/
 
 	// Crea la tarea que gestiona los comandos UART (definida en el fichero commands.c)
-	//
 	if((xTaskCreate(vUARTTask, (portCHAR *)"Uart", 512,NULL,tskIDLE_PRIORITY + 1, NULL) != pdTRUE))
 	{
 		while(1);
@@ -214,10 +190,9 @@ int main(void)
 	//Ademas, inicializa el USB y configura el perfil USB-CDC
 	TivaRPC_Init(); //Inicializo la aplicacion de comunicacion con el PC (Remote). Ver fichero tivarpc.c
 
+    /********** Ejecucion de tareas **********/
 
-	//
 	// Arranca el  scheduler.  Pasamos a ejecutar las tareas que se hayan activado.
-	//
 	vTaskStartScheduler();	//el RTOS habilita las interrupciones al entrar aqui, asi que no hace falta habilitarlas
 	//De la funcion vTaskStartScheduler no se sale nunca... a partir de aqui pasan a ejecutarse las tareas.
 
@@ -226,4 +201,32 @@ int main(void)
 		//Si llego aqui es que algo raro ha pasado
 	}
 }
+
+/********** RTIs **********/
+
+void ButtonHandler(void){
+
+    GPIOIntDisable(GPIO_PORTF_BASE,GPIO_PIN_4|GPIO_PIN_0);
+    GPIOIntClear(GPIO_PORTF_BASE,GPIO_PIN_4|GPIO_PIN_0);
+
+//    BaseType_t xHigherPriorityTaskWoken;
+    signed portBASE_TYPE xHigherPriorityTaskWoken;
+    xHigherPriorityTaskWoken = pdFALSE;
+
+    bool buttons[2];
+
+    buttons[0]=( 0 == GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_4) );
+    buttons[1]=( 0 == GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_0) );
+
+    GPIOIntEnable(GPIO_PORTF_BASE,GPIO_PIN_4|GPIO_PIN_0);
+
+    if(xQueueSendFromISR(buttonsQueue, buttons, &xHigherPriorityTaskWoken) == errQUEUE_FULL){
+
+        while(1);
+
+    }
+    portEND_SWITCHING_ISR(xHigherPriorityTaskWoken);
+
+}
+
 
